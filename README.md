@@ -1,4 +1,4 @@
-# 抖音公开作品采集小工具
+# 抖音、B站、小红书公开作品采集工具
 
 输入抖音号，采集该公开账号的作品页链接、标题、完整文案、发布时间，以及页面响应中可用时的播放/封面地址。脚本用真实 Chrome 打开抖音并监听网页自身的分页请求，因此不需要自行实现易失效的 `a_bogus` / `X-Bogus` 签名。结果直接输出为带中文表头的 Excel 文件，文件名使用账号昵称。
 
@@ -80,6 +80,8 @@ python xiaohongshu_account_notes.py "昵称或小红书号"
 ```powershell
 python xiaohongshu_account_notes.py "用户主页URL" --skip-details
 ```
+
+主页列表采集完成后会立即写入一次 Excel 检查点，逐条补正文时每 10 条更新一次。中途关闭浏览器时，脚本会停止补正文并保留当前已经获取的数据。
 
 登录状态保存在 `.xiaohongshu-browser`。首次运行若出现登录或验证码，请在打开的 Chrome 中手动完成，脚本不会绕过平台验证。
 # littleUtils
