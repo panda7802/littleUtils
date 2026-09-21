@@ -127,19 +127,58 @@ def find_profile_url(page: Page, account: str, login_wait: int) -> str:
     )
 
 
-def collect_posts(page: Page, profile_url: str, max_posts: int, max_idle: int) -> list[dict[str, Any]]:
+def advance_page(page: Page) -> None:
+    """Scroll the actual list container as well as the document.
+
+    Douyin sometimes places the post grid in a nested scrollable element, and
+    a virtualized grid can keep the document height unchanged while paging.
+    """
+    page.evaluate("""() => {
+        const elements = [...document.querySelectorAll('*')].filter(el => {
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return rect.width > 300 && rect.height > 150 &&
+                rect.bottom > 0 && rect.top < innerHeight &&
+                el.scrollHeight > el.clientHeight + 100 &&
+                ['auto', 'scroll', 'overlay'].includes(style.overflowY);
+        });
+        elements.sort((a, b) =>
+            (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+        if (elements.length) {
+            const target = elements[0];
+            target.scrollTop += Math.max(target.clientHeight * 0.8, 600);
+        }
+        window.scrollBy(0, Math.max(innerHeight * 0.8, 600));
+    }""")
+    page.mouse.move(900, 700)
+    page.mouse.wheel(0, 1000)
+
+
+def collect_posts(page: Page, profile_url: str, max_posts: int, max_idle: int) -> tuple[list[dict[str, Any]], bool]:
     posts: dict[str, dict[str, Any]] = {}
     last_change = time.monotonic()
+    has_more: bool | None = None
+    api_error: str | None = None
 
     def on_response(response: Response) -> None:
-        nonlocal last_change
+        nonlocal last_change, has_more, api_error
         if not any(marker in response.url for marker in POST_API_MARKERS):
             return
         try:
             payload = response.json()
         except Exception:
+            if response.status >= 400:
+                api_error = f"HTTP {response.status}"
             return
-        items = payload.get("aweme_list") or payload.get("data", {}).get("aweme_list") or []
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        if not isinstance(data, dict):
+            return
+        if data.get("status_code") not in (None, 0):
+            api_error = f"接口状态码 {data['status_code']}"
+            return
+        if isinstance(data.get("has_more"), (bool, int)):
+            has_more = bool(data["has_more"])
+        items = data.get("aweme_list") or []
         before = len(posts)
         for item in items:
             if not isinstance(item, dict):
@@ -156,23 +195,30 @@ def collect_posts(page: Page, profile_url: str, max_posts: int, max_idle: int) -
     page.goto(profile_url, wait_until="domcontentloaded", timeout=60_000)
     page.wait_for_timeout(5_000)
 
-    unchanged_height_rounds = 0
-    previous_height = 0
+    idle_rounds = 0
+    complete = False
     while len(posts) < max_posts:
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        before = len(posts)
+        advance_page(page)
         page.wait_for_timeout(1_500)
-        height = page.evaluate("document.body.scrollHeight")
-        unchanged_height_rounds = unchanged_height_rounds + 1 if height == previous_height else 0
-        previous_height = height
-
-        idle_seconds = time.monotonic() - last_change
-        if idle_seconds >= max_idle and unchanged_height_rounds >= 3:
+        if len(posts) > before:
+            idle_rounds = 0
+        else:
+            idle_rounds += 1
+        if has_more is False and idle_rounds >= 3:
+            complete = True
+            break
+        if api_error:
+            print(f"      分页请求受阻：{api_error}")
+            break
+        if time.monotonic() - last_change >= max_idle and idle_rounds >= 6:
+            print("      长时间无新作品，尚未确认列表到底；将导出当前部分结果")
             break
 
     page.remove_listener("response", on_response)
     rows = [post_to_row(post) for post in posts.values()]
     rows.sort(key=lambda row: row["created_at"] or datetime.min, reverse=True)
-    return rows[:max_posts]
+    return rows[:max_posts], complete
 
 
 def write_results(rows: list[dict[str, Any]], output_dir: Path, account: str) -> Path:
@@ -262,7 +308,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("account", help="抖音号，例如 837672563")
     parser.add_argument("--profile-url", help="已知用户主页 URL 时建议直接传入，最稳定")
     parser.add_argument("--max-posts", type=int, default=10_000, help="最多采集作品数")
-    parser.add_argument("--max-idle", type=int, default=12, help="多少秒无新数据后停止")
+    parser.add_argument("--max-idle", type=int, default=60, help="多少秒无新数据后停止；未确认到底时标记为部分结果")
     parser.add_argument("--login-wait", type=int, default=120, help="等待手动登录/验证码的秒数")
     parser.add_argument("--output", type=Path, default=Path("output"), help="输出目录")
     parser.add_argument("--headless", action="store_true", help="无头运行；首次使用不建议开启")
@@ -288,7 +334,7 @@ def main() -> int:
             page = context.pages[0] if context.pages else context.new_page()
             login_wait = min(args.login_wait, 10) if args.headless else args.login_wait
             profile_url = args.profile_url or find_profile_url(page, args.account, login_wait)
-            rows = collect_posts(page, profile_url, args.max_posts, args.max_idle)
+            rows, complete = collect_posts(page, profile_url, args.max_posts, args.max_idle)
             context.close()
     except PlaywrightTimeoutError as exc:
         print(f"页面加载超时：{exc}", file=sys.stderr)
@@ -298,8 +344,12 @@ def main() -> int:
         print("请确认浏览器中已登录且没有未完成的验证码。", file=sys.stderr)
         return 1
 
+    if not rows:
+        print("未获取到作品；请检查浏览器中的登录、验证码或主页链接。", file=sys.stderr)
+        return 1
     xlsx_path = write_results(rows, args.output, args.account)
-    print(f"[3/3] 完成，共 {len(rows)} 条")
+    status = "已确认列表到底" if complete else "部分结果，未确认列表到底"
+    print(f"[3/3] {status}，共 {len(rows)} 条")
     print(f"      Excel: {xlsx_path.resolve()}")
     return 0
 

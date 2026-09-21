@@ -37,6 +37,14 @@ python douyin_account_videos.py 837672563 --profile-url "https://www.douyin.com/
 python douyin_account_videos.py 837672563 --max-posts 20
 ```
 
+抖音主页可能使用内部滚动区域，脚本会同时滚动页面和作品列表。默认连续 60 秒没有新作品才停止；只有接口明确表示没有下一页时才报告“已确认列表到底”，否则导出的 Excel 会提示为“部分结果”。
+
+如果以前只抓到了前几十条作品，用同一条命令重新运行即可。例如：
+
+```powershell
+python douyin_account_videos.py "gangan_sama" --profile-url "https://www.douyin.com/user/MS4wLjABAAAAGf3zhbdK2Yb0zqfnVDFvVHW4jTT8FMG44F1yWcDOc8U?from_tab_name=main"
+```
+
 ## Excel 列说明
 
 - `作品链接`：稳定的作品页面地址，建议业务中保存此列。
